@@ -1,25 +1,35 @@
 {
   "name": "Backend Python FastAPI",
 
-  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
 
   "features": {
     "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/git-lfs:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/azure-cli:1": {}
+  },
+
+  "remoteUser": "vscode",
+
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1"
   },
 
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
-        "ms-python.vscode-pylance"
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "github.vscode-github-actions",
+        "ms-azuretools.vscode-azureappservice"
       ]
     }
   },
 
-  "forwardPorts": [
-    8000
-  ],
+  "forwardPorts": [8000],
 
   "portsAttributes": {
     "8000": {
@@ -28,5 +38,5 @@
     }
   },
 
-  "postCreateCommand": "if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo 'No se encontró requirements.txt'; fi"
+  "postCreateCommand": "git lfs install && pip install --upgrade pip && if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo 'No se encontró requirements.txt'; fi"
 }
