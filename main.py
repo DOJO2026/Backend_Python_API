@@ -1,6 +1,9 @@
 import json
 import os
+import re
+import unicodedata
 import uuid
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
@@ -58,6 +61,85 @@ SYSTEM_PROMPT = (
     "naturalidad."
 )
 
+# ---------------------------------------------------------------------------
+# Guardarraíl (Trip Wire) - corre ANTES de la primera llamada al LLM.
+# Si se activa, ni siquiera se decide que herramienta usar: se corta ahí.
+# ---------------------------------------------------------------------------
+GUARDRAIL_MESSAGE = "Lo siento, no puedo procesar mensajes que contengan lenguaje ofensivo."
+BLOCKED_WORDS_FILE = Path(__file__).parent / "blocked_words.txt"
+
+
+def _normalize(text: str) -> str:
+    """minúsculas + sin acentos, para que 'Ofénsivo' == 'ofensivo'."""
+    text = text.lower()
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+
+def _load_blocked_patterns(path: Path) -> List[re.Pattern]:
+    """Lee blocked_words.txt y compila cada línea como patrón (ignora # y vacías)."""
+    if not path.exists():
+        print(f"[WARN] No se encontró {path}; el guardarraíl no bloqueará nada.")
+        return []
+    patterns = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        word = _normalize(line)
+        pattern = word if r"\b" in word else rf"\b{word}\b"
+        patterns.append(re.compile(pattern))
+    return patterns
+
+
+# Se cargan una sola vez al arrancar el proceso.
+BLOCKED_PATTERNS = _load_blocked_patterns(BLOCKED_WORDS_FILE)
+
+
+def reload_guardrail():
+    """Recarga blocked_words.txt sin reiniciar el servidor."""
+    global BLOCKED_PATTERNS
+    BLOCKED_PATTERNS = _load_blocked_patterns(BLOCKED_WORDS_FILE)
+
+
+def check_trip_wire(text: str) -> bool:
+    """Devuelve True si el mensaje debe bloquearse antes de llegar al LLM."""
+    normalized = _normalize(text)
+    return any(p.search(normalized) for p in BLOCKED_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Confirmacion humana (S/N) antes de ejecutar ciertas tools.
+# Util para tools que consultan fuentes externas (ej. Wikipedia) y donde
+# quieres que el usuario apruebe explicitamente la consulta.
+# ---------------------------------------------------------------------------
+
+# Nombres de las tools (ver TOOLS_DEFINITION) que requieren confirmacion S/N
+# antes de ejecutarse. Agrega "buscar_documentos_internos" aqui tambien si
+# quieres que la RAG interna pida confirmacion.
+TOOLS_REQUIRING_CONFIRMATION = {"buscar_conocimiento_general"}
+
+AFFIRMATIVE_ANSWERS = {"s", "si", "sí", "yes", "y", "claro", "dale", "ok", "vale"}
+NEGATIVE_ANSWERS = {"n", "no", "nel", "nop"}
+
+
+def _parse_confirmation(text: str) -> Optional[bool]:
+    """True si es afirmativo, False si es negativo, None si no se entendio."""
+    normalized = _normalize(text).strip().strip("¿?!. ")
+    if normalized in AFFIRMATIVE_ANSWERS:
+        return True
+    if normalized in NEGATIVE_ANSWERS:
+        return False
+    return None
+
+
+# session_id -> {messages, tool_calls, herramientas_pendientes,
+#                pregunta_original, pregunta_confirmacion}
+# Tambien en memoria; igual que SESSIONS, no sobrevive un reinicio ni escala
+# a multiples instancias sin moverlo a Redis/DB.
+PENDING_CONFIRMATIONS: Dict[str, dict] = {}
+
+
 # Historial en memoria por sesion. Para produccion, reemplazar por Redis/DB.
 SESSIONS: Dict[str, List[dict]] = {}
 
@@ -84,6 +166,8 @@ class ChatResponse(BaseModel):
     answer: str
     fuentes: List[str]
     herramientas_usadas: List[str]
+    blocked: bool = False
+    requiere_confirmacion: bool = False
 
 
 class HistoryTurn(BaseModel):
@@ -184,7 +268,7 @@ TOOLS_DEFINITION = [
                 "Busca informacion en la base de conocimiento interna de la empresa "
                 "(documentos propios, PDFs cargados, ej. articulos tecnicos sobre Quarkus). "
                 "Usa esta funcion cuando la pregunta sea sobre temas especificos de la empresa "
-                "o de los documentos internos."
+                "o de los documentos internos ."
             ),
             "parameters": {
                 "type": "object",
@@ -243,12 +327,100 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/guardrail/reload")
+def guardrail_reload():
+    """Recarga blocked_words.txt en caliente, sin reiniciar el servidor."""
+    reload_guardrail()
+    return {"status": "reloaded", "patterns_loaded": len(BLOCKED_PATTERNS)}
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
     history = SESSIONS.setdefault(session_id, [])
 
+    # --- Guardarraíl: corre ANTES de cualquier otra cosa, incluida una
+    # eventual confirmacion pendiente ---
+    if check_trip_wire(req.question):
+        PENDING_CONFIRMATIONS.pop(session_id, None)
+        return ChatResponse(
+            session_id=session_id,
+            answer=GUARDRAIL_MESSAGE,
+            fuentes=[],
+            herramientas_usadas=[],
+            blocked=True,
+        )
+
     try:
+        # --- ¿Esta sesion tiene una tool esperando confirmacion S/N? ---
+        if session_id in PENDING_CONFIRMATIONS:
+            confirmado = _parse_confirmation(req.question)
+            pendiente = PENDING_CONFIRMATIONS[session_id]
+
+            if confirmado is None:
+                # No entendimos la respuesta: repetimos la pregunta, sin
+                # ejecutar nada y sin perder lo que estaba pendiente.
+                return ChatResponse(
+                    session_id=session_id,
+                    answer=f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
+                    fuentes=[],
+                    herramientas_usadas=pendiente["herramientas_pendientes"],
+                    requiere_confirmacion=True,
+                )
+
+            PENDING_CONFIRMATIONS.pop(session_id)
+
+            if not confirmado:
+                answer = "De acuerdo, no realicé esa búsqueda. ¿Hay algo más en lo que te pueda ayudar?"
+                return ChatResponse(
+                    session_id=session_id,
+                    answer=answer,
+                    fuentes=[],
+                    herramientas_usadas=[],
+                )
+
+            # Confirmado -> ahora si ejecutamos las tool_calls que quedaron pendientes
+            messages = pendiente["messages"]
+            fuentes_usadas: List[str] = []
+            herramientas_usadas: List[str] = pendiente["herramientas_pendientes"]
+
+            for tool_call in pendiente["tool_calls"]:
+                argumentos = json.loads(tool_call.function.arguments)
+                resultado_json = ejecutar_tool(tool_call.function.name, argumentos)
+                resultado_dict = json.loads(resultado_json)
+
+                if "fuentes" in resultado_dict:
+                    fuentes_usadas.extend(resultado_dict["fuentes"])
+                elif "fuente" in resultado_dict:
+                    fuentes_usadas.append(resultado_dict["fuente"])
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": resultado_json,
+                    }
+                )
+
+            final_response = client.chat.completions.create(
+                model=CONFIG["oai_deployment"],
+                temperature=0.5,
+                max_tokens=1000,
+                messages=messages,
+            )
+            answer = final_response.choices[0].message.content
+
+            history.append({"role": "user", "content": pendiente["pregunta_original"]})
+            history.append({"role": "assistant", "content": answer})
+
+            return ChatResponse(
+                session_id=session_id,
+                answer=answer,
+                fuentes=list(set(fuentes_usadas)),
+                herramientas_usadas=herramientas_usadas,
+            )
+
+        # --- Flujo normal: no hay nada pendiente para esta sesion ---
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
         messages.append({"role": "user", "content": req.question})
@@ -268,8 +440,40 @@ def chat(req: ChatRequest):
         herramientas_usadas: List[str] = []
 
         if response_message.tool_calls:
-            messages.append(response_message)
+            nombres_tools = [tc.function.name for tc in response_message.tool_calls]
 
+            # ¿Alguna de las tools que el modelo quiere usar requiere
+            # confirmacion S/N antes de ejecutarse?
+            if any(n in TOOLS_REQUIRING_CONFIRMATION for n in nombres_tools):
+                messages.append(response_message)
+
+                primer_call = response_message.tool_calls[0]
+                primer_arg = json.loads(primer_call.function.arguments)
+                consulta = primer_arg.get("query", req.question)
+                pregunta_confirmacion = (
+                    f'Para responder eso necesito consultar una fuente externa '
+                    f'("{consulta}"). ¿Deseas que la consulte? Responde S/N.'
+                )
+
+                PENDING_CONFIRMATIONS[session_id] = {
+                    "messages": messages,
+                    "tool_calls": response_message.tool_calls,
+                    "herramientas_pendientes": nombres_tools,
+                    "pregunta_original": req.question,
+                    "pregunta_confirmacion": pregunta_confirmacion,
+                }
+
+                return ChatResponse(
+                    session_id=session_id,
+                    answer=pregunta_confirmacion,
+                    fuentes=[],
+                    herramientas_usadas=nombres_tools,
+                    requiere_confirmacion=True,
+                )
+
+            # Ninguna tool pedida requiere confirmacion -> se ejecutan de
+            # inmediato, igual que antes.
+            messages.append(response_message)
             for tool_call in response_message.tool_calls:
                 nombre_tool = tool_call.function.name
                 argumentos = json.loads(tool_call.function.arguments)
@@ -291,7 +495,6 @@ def chat(req: ChatRequest):
                     }
                 )
 
-            # Segunda llamada: el modelo genera la respuesta final con los resultados
             final_response = client.chat.completions.create(
                 model=CONFIG["oai_deployment"],
                 temperature=0.5,
@@ -331,6 +534,7 @@ def delete_session(session_id: str):
     if session_id not in SESSIONS:
         raise HTTPException(status_code=404, detail="Sesion no encontrada")
     del SESSIONS[session_id]
+    PENDING_CONFIRMATIONS.pop(session_id, None)
     return {"status": "eliminada", "session_id": session_id}
 
 
