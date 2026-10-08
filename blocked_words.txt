@@ -1,0 +1,11 @@
+# Lista de palabras/patrones bloqueados por el guardarraíl (trip wire).
+# Una palabra o patrón regex por línea. Las líneas que empiezan con # se ignoran.
+# No hace falta escribir acentos: el texto se normaliza antes de comparar.
+# Usa \b al inicio/fin si quieres exigir "palabra completa" y evitar que
+# "clase" dispare una regla pensada para "las".
+
+idiota
+imbecil
+pendejo
+mierda
+estupido
