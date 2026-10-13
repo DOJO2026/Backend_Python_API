@@ -5,13 +5,12 @@ import unicodedata
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
-
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AzureOpenAI
-from pydantic import BaseModel, Field
+from app.schemas.chat import ChatResponse,ChatRequest,HistoryTurn
 
 # ---------------------------------------------------------------------------
 # Configuracion
@@ -156,23 +155,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Modelos Pydantic
 # ---------------------------------------------------------------------------
-class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="Pregunta del usuario")
-    session_id: Optional[str] = Field(None, description="ID de sesion. Si no se envia, se crea una nueva")
 
 
-class ChatResponse(BaseModel):
-    session_id: str
-    answer: str
-    fuentes: List[str]
-    herramientas_usadas: List[str]
-    blocked: bool = False
-    requiere_confirmacion: bool = False
-
-
-class HistoryTurn(BaseModel):
-    role: str
-    content: str
 
 
 # ---------------------------------------------------------------------------
