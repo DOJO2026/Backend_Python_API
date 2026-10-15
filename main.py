@@ -10,7 +10,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AzureOpenAI
-from app.schemas.chat import ChatResponse,ChatRequest,HistoryTurn
+# from app.schemas.chat import ChatResponse,ChatRequest,HistoryTurn
+# ---------------------------------------------------------------------------
+# CAMBIO 1: imports (arriba del main.py, reemplaza la linea de app.schemas.chat)
+# ---------------------------------------------------------------------------
+from datetime import datetime, timezone
+from app.schemas.chat import ChatMessage, ChatRequest, MessageSource,HistoryTurn
 
 # ---------------------------------------------------------------------------
 # Configuracion
@@ -318,50 +323,80 @@ def guardrail_reload():
     return {"status": "reloaded", "patterns_loaded": len(BLOCKED_PATTERNS)}
 
 
-@app.post("/chat", response_model=ChatResponse)
+
+# ---------------------------------------------------------------------------
+# CAMBIO 2: helper nuevo (ponlo justo antes del endpoint /chat).
+# Reemplaza a ChatResponse(...): arma un ChatMessage a partir de los mismos datos.
+# ---------------------------------------------------------------------------
+def _respuesta(
+    conv_id: str,
+    answer: str,
+    model: str,
+    fuentes: Optional[List[str]] = None,
+    herramientas: Optional[List[str]] = None,
+    blocked: bool = False,
+    confirmacion: bool = False,
+) -> ChatMessage:
+    fuentes_unicas = list(dict.fromkeys(fuentes or []))  # sin duplicados, conserva orden
+    return ChatMessage(
+        id=str(uuid.uuid4()),
+        conversation_id=conv_id,
+        role="assistant",
+        content=answer,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        sources=[
+            MessageSource(title=f, url=f if f.startswith("http") else None)
+            for f in fuentes_unicas
+        ] or None,
+        status="complete",
+        model_used=model,
+        interactive_type="tool_confirmation" if confirmacion else None,
+        blocked=blocked,
+        tools_used=herramientas or None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CAMBIO 3: el endpoint. Misma estructura que el original; solo cambian:
+#   - ruta y response_model
+#   - req.question -> req.content, req.session_id -> req.conversation_id
+#   - modelo y temperatura salen del request
+#   - ChatResponse(...) -> _respuesta(...)
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
 def chat(req: ChatRequest):
-    session_id = req.session_id or str(uuid.uuid4())
+    session_id = req.conversation_id or str(uuid.uuid4())
     history = SESSIONS.setdefault(session_id, [])
+    model = req.model_id or CONFIG["oai_deployment"]
 
     # --- Guardarraíl: corre ANTES de cualquier otra cosa, incluida una
     # eventual confirmacion pendiente ---
-    if check_trip_wire(req.question):
+    if check_trip_wire(req.content):
         PENDING_CONFIRMATIONS.pop(session_id, None)
-        return ChatResponse(
-            session_id=session_id,
-            answer=GUARDRAIL_MESSAGE,
-            fuentes=[],
-            herramientas_usadas=[],
-            blocked=True,
-        )
+        return _respuesta(session_id, GUARDRAIL_MESSAGE, model, blocked=True)
 
     try:
         # --- ¿Esta sesion tiene una tool esperando confirmacion S/N? ---
         if session_id in PENDING_CONFIRMATIONS:
-            confirmado = _parse_confirmation(req.question)
+            confirmado = _parse_confirmation(req.content)
             pendiente = PENDING_CONFIRMATIONS[session_id]
 
             if confirmado is None:
                 # No entendimos la respuesta: repetimos la pregunta, sin
                 # ejecutar nada y sin perder lo que estaba pendiente.
-                return ChatResponse(
-                    session_id=session_id,
-                    answer=f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
-                    fuentes=[],
-                    herramientas_usadas=pendiente["herramientas_pendientes"],
-                    requiere_confirmacion=True,
+                return _respuesta(
+                    session_id,
+                    f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
+                    model,
+                    herramientas=pendiente["herramientas_pendientes"],
+                    confirmacion=True,
                 )
 
             PENDING_CONFIRMATIONS.pop(session_id)
 
             if not confirmado:
                 answer = "De acuerdo, no realicé esa búsqueda. ¿Hay algo más en lo que te pueda ayudar?"
-                return ChatResponse(
-                    session_id=session_id,
-                    answer=answer,
-                    fuentes=[],
-                    herramientas_usadas=[],
-                )
+                return _respuesta(session_id, answer, model)
 
             # Confirmado -> ahora si ejecutamos las tool_calls que quedaron pendientes
             messages = pendiente["messages"]
@@ -387,8 +422,8 @@ def chat(req: ChatRequest):
                 )
 
             final_response = client.chat.completions.create(
-                model=CONFIG["oai_deployment"],
-                temperature=0.5,
+                model=model,
+                temperature=req.temperature,
                 max_tokens=1000,
                 messages=messages,
             )
@@ -397,22 +432,20 @@ def chat(req: ChatRequest):
             history.append({"role": "user", "content": pendiente["pregunta_original"]})
             history.append({"role": "assistant", "content": answer})
 
-            return ChatResponse(
-                session_id=session_id,
-                answer=answer,
-                fuentes=list(set(fuentes_usadas)),
-                herramientas_usadas=herramientas_usadas,
+            return _respuesta(
+                session_id, answer, model,
+                fuentes=fuentes_usadas, herramientas=herramientas_usadas,
             )
 
         # --- Flujo normal: no hay nada pendiente para esta sesion ---
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
-        messages.append({"role": "user", "content": req.question})
+        messages.append({"role": "user", "content": req.content})
 
         # Primera llamada: el modelo decide si necesita usar una herramienta
         response = client.chat.completions.create(
-            model=CONFIG["oai_deployment"],
-            temperature=0.3,
+            model=model,
+            temperature=req.temperature,
             max_tokens=1000,
             messages=messages,
             tools=TOOLS_DEFINITION,
@@ -433,7 +466,7 @@ def chat(req: ChatRequest):
 
                 primer_call = response_message.tool_calls[0]
                 primer_arg = json.loads(primer_call.function.arguments)
-                consulta = primer_arg.get("query", req.question)
+                consulta = primer_arg.get("query", req.content)
                 pregunta_confirmacion = (
                     f'Para responder eso necesito consultar una fuente externa '
                     f'("{consulta}"). ¿Deseas que la consulte? Responde S/N.'
@@ -443,16 +476,13 @@ def chat(req: ChatRequest):
                     "messages": messages,
                     "tool_calls": response_message.tool_calls,
                     "herramientas_pendientes": nombres_tools,
-                    "pregunta_original": req.question,
+                    "pregunta_original": req.content,
                     "pregunta_confirmacion": pregunta_confirmacion,
                 }
 
-                return ChatResponse(
-                    session_id=session_id,
-                    answer=pregunta_confirmacion,
-                    fuentes=[],
-                    herramientas_usadas=nombres_tools,
-                    requiere_confirmacion=True,
+                return _respuesta(
+                    session_id, pregunta_confirmacion, model,
+                    herramientas=nombres_tools, confirmacion=True,
                 )
 
             # Ninguna tool pedida requiere confirmacion -> se ejecutan de
@@ -480,8 +510,8 @@ def chat(req: ChatRequest):
                 )
 
             final_response = client.chat.completions.create(
-                model=CONFIG["oai_deployment"],
-                temperature=0.5,
+                model=model,
+                temperature=req.temperature,
                 max_tokens=1000,
                 messages=messages,
             )
@@ -490,14 +520,12 @@ def chat(req: ChatRequest):
             answer = response_message.content
 
         # Guardar el turno en el historial de la sesion
-        history.append({"role": "user", "content": req.question})
+        history.append({"role": "user", "content": req.content})
         history.append({"role": "assistant", "content": answer})
 
-        return ChatResponse(
-            session_id=session_id,
-            answer=answer,
-            fuentes=list(set(fuentes_usadas)),
-            herramientas_usadas=herramientas_usadas,
+        return _respuesta(
+            session_id, answer, model,
+            fuentes=fuentes_usadas, herramientas=herramientas_usadas,
         )
 
     except requests.HTTPError as ex:
