@@ -1,0 +1,16 @@
+
+from typing import Optional
+from app.services import normalize
+
+AFFIRMATIVE_ANSWERS = {"s", "si", "sí", "yes", "y", "claro", "dale", "ok", "vale"}
+NEGATIVE_ANSWERS = {"n", "no", "nel", "nop"}
+
+
+def _parse_confirmation(text: str) -> Optional[bool]:
+    """True si es afirmativo, False si es negativo, None si no se entendio."""
+    normalized = normalize(text).strip().strip("¿?!. ")
+    if normalized in AFFIRMATIVE_ANSWERS:
+        return True
+    if normalized in NEGATIVE_ANSWERS:
+        return False
+    return None
