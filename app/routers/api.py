@@ -1,5 +1,6 @@
 from fastapi import APIRouter,FastAPI, HTTPException
 from typing import List
+from app.services import prompts
 
 router=APIRouter()
 
@@ -89,7 +90,7 @@ def chat(req: ChatRequest):
             )
 
         # --- Flujo normal: no hay nada pendiente para esta sesion ---
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
         messages.extend(history)
         messages.append({"role": "user", "content": req.content})
 
