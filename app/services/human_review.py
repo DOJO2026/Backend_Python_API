@@ -1,9 +1,11 @@
 
-from typing import Optional
+from typing import Dict, Optional
 from app.services import normalize
 
 AFFIRMATIVE_ANSWERS = {"s", "si", "sí", "yes", "y", "claro", "dale", "ok", "vale"}
 NEGATIVE_ANSWERS = {"n", "no", "nel", "nop"}
+TOOLS_REQUIRING_CONFIRMATION = {"buscar_conocimiento_general"}
+PENDING_CONFIRMATIONS: Dict[str, dict] = {}
 
 
 def _parse_confirmation(text: str) -> Optional[bool]:
