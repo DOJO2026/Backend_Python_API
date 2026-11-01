@@ -1,15 +1,12 @@
+from app.core.config import settings
+from app.services.llm import get_embedding
+import requests
 
-
-def get_embedding(text: str) -> List[float]:
-    response = client.embeddings.create(model=CONFIG["embedding_deployment"], input=text)
-    return response.data[0].embedding
-
-
-def buscar_documentos_internos(query: str, top: int = 5) -> dict:
+def search_internal_documents(query: str, top: int = 5) -> dict:
     query_vector = get_embedding(query)
 
-    url = f"{CONFIG['search_endpoint'].rstrip('/')}/indexes/{CONFIG['search_index']}/docs/search?api-version=2023-11-01"
-    headers = {"Content-Type": "application/json", "api-key": CONFIG["search_key"]}
+    url = f"{settings.search_endpoint}/indexes/{settings.azure_search_index}/docs/search?api-version=2023-11-01"
+    headers = {"Content-Type": "application/json", "api-key": settings.azure_search_key}
     body = {
         "search": query,
         "vectorQueries": [
