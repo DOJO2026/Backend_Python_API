@@ -1,6 +1,6 @@
 
 from typing import Dict, Optional
-from app.services import normalize
+from app.services.normalize import normalize
 
 AFFIRMATIVE_ANSWERS = {"s", "si", "sí", "yes", "y", "claro", "dale", "ok", "vale"}
 NEGATIVE_ANSWERS = {"n", "no", "nel", "nop"}

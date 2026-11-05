@@ -1,6 +1,6 @@
+import requests
 
-
-def buscar_conocimiento_general(query: str) -> dict:
+def search_general_knowledge(query: str) -> dict:
     headers = {"User-Agent": "ProyectoDojoRAG/1.0 (proyecto de aprendizaje)"}
     try:
         search_url = "https://es.wikipedia.org/w/api.php"

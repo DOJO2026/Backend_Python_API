@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from app.schemas.chat import ChatMessage, MessageSource
 
 
-def respuesta(
+def response(
+    session_id: str,
     conv_id: str,
     answer: str,
     model: str,
@@ -14,9 +15,10 @@ def respuesta(
     blocked: bool = False,
     confirmacion: bool = False,
 ) -> ChatMessage:
-    fuentes_unicas = list(dict.fromkeys(fuentes or []))  # sin duplicados, conserva orden
+    # sin duplicados, conserva orden
+    fuentes_unicas = list(dict.fromkeys(fuentes or []))
     return ChatMessage(
-        id=str(uuid.uuid4()),
+        id=session_id,
         conversation_id=conv_id,
         role="assistant",
         content=answer,

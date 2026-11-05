@@ -1,36 +1,11 @@
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal, Optional,List
 
-
-#####################################
-###ANTIGUO MODELO
-# class ChatRequest(BaseModel):
-#     question: str = Field(..., min_length=1, description="Pregunta del usuario")
-#     session_id: Optional[str] = Field(None, description="ID de sesion. Si no se envia, se crea una nueva")
-
-class HistoryTurn(BaseModel):
-    role: str
-    content: str
-    
-# class ChatResponse(BaseModel):
-#     session_id: str
-#     answer: str
-#     fuentes: List[str]
-#     herramientas_usadas: List[str]
-#     blocked: bool = False
-#     requiere_confirmacion: bool = False
-#####################################
-
-
-##################### NUEVO MODELO ################
-#####################################
 class _Base(BaseModel):
     # Permite construir con nombres snake_case (conversation_id=...) y
     # serializar con alias camelCase (conversationId) hacia el frontend.
     model_config = ConfigDict(populate_by_name=True)
 
-#* **Ruta:** `/api/v1/chat/conversations`
-#conversations.json          # Listado de conversaciones e historial
 class ChatConversation(_Base):
     id: str
     title: str
@@ -52,11 +27,6 @@ class ChatConversation(_Base):
     tokens_used: Optional[int] = Field(0, alias="tokensUsed")
     positive_feedback_count: Optional[int] = Field(0, alias="positiveFeedbackCount")
 
-
-
-#####################################
-#* **Ruta:** `/api/v1/chat/conversations/:id/messages`
-#messages.json               # Mensajes por conversación con estados interactivos
 class MessageSource(_Base):
     title: Optional[str] = None
     url: Optional[str] = None
@@ -69,7 +39,7 @@ class ClaimDetails(_Base):
     
 class ChatMessage(_Base):
     id: str
-    conversation_id: str = Field(..., alias="conversationId")
+    conversation_id: Optional[str] = Field(None, alias="conversationId")
     role: Literal["user", "assistant"]
     content: str
     timestamp: str
@@ -90,11 +60,7 @@ class ChatMessage(_Base):
     # NUEVOS: reemplazan a blocked y herramientas_usadas del ChatResponse viejo
     blocked: Optional[bool] = False
     tools_used: Optional[List[str]] = Field(None, alias="toolsUsed")
-#####################################
 
-#####################################
-#* **Ruta:** `/api/v1/chat/messages`
-#send-message-request.json   # Payload de envío de consulta (prompt)
 class ChatRequest(_Base):
     conversation_id: Optional[str] = Field(None, alias="conversationId")
     content: str
@@ -103,3 +69,27 @@ class ChatRequest(_Base):
     reasoning_depth: str = Field("standard", alias="reasoningDepth")
     stream: bool = True
     attached_docs: Optional[List[str]] = Field(None, alias="attachedDocs")
+    
+class RepositoryDocItem(_Base):
+    id: str
+    title: str
+    category: str
+    size: str
+    updated_at: str= Field(..., alias="updatedAt")
+    chunks: int
+    embedding_model: str = Field(...,alias="embeddingModel")
+    description: str
+    
+class RagCitation(_Base):
+  id: str
+  title: str
+  page: Optional[int]=None
+  snippet: Optional[str]=None
+  confidence: Optional[int]=None
+  category: Optional[str]=None
+  chunk_id: Optional[str]=Field(None,alias="chunkId")
+  cosine_similarity: Optional[int]=Field(None,alias="cosineSimilarity")
+  tokens_count: Optional[int]=Field(0,alias="tokensCount")
+  embedding_model: str=Field(...,alias="embeddingModel")
+  total_document_pages: Optional[int]=Field(None,alias="totalDocumentPages")
+

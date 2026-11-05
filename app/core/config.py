@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     azure_sql_database:str
     azure_sql_user:str
     azure_sql_password:str
+    #azure blob storage
+    azure_storage_connection_string:str
+    azure_storage_container:str
     #ubicacion de los archivos de palabras bloqueadas
     blocked_words_file: Path = BASE_DIR / "blocked_words.txt"
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", extra="ignore")

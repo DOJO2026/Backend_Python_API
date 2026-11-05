@@ -1,7 +1,6 @@
 from typing import List
 from openai import AzureOpenAI
 from app.core.config import settings
-from app.services.tools import TOOLS_DEFINITION
 
 client = AzureOpenAI(
     azure_endpoint=settings.oai_endpoint,
@@ -20,19 +19,22 @@ def get_embedding(text: str) -> List[float]:
 def get_chat(model: str, temperature: float, messages: List[dict]):
     """Pide la respuesta a gpt-4.1-mini. Devuelve (texto, uso de tokens)."""
     response = client.chat.completions.create(
-        model=model, temperature=temperature, max_tokens=1000, messages=messages
+        model=model, 
+        temperature=temperature, 
+        max_tokens=1000, 
+        messages=messages
     )
-    return response.choices[0].message.content, response.usage
+    return response.choices[0].message, response.usage
 
 
-def get_chat_with_tools(model: str, temperature: float, messages: List[dict]):
+def get_chat_with_tools(model: str, temperature: float, messages: List[dict], tools: List[dict]):
     """Pide la respuesta a gpt-4.1-mini. Devuelve (texto, uso de tokens)."""
     response = client.chat.completions.create(
         model=model,
         temperature=temperature,
         max_tokens=1000,
         messages=messages,
-        tools=TOOLS_DEFINITION,
+        tools=tools,
         tool_choice="auto",
     )
-    return response.choices[0].message.content, response.usage
+    return response.choices[0].message, response.usage

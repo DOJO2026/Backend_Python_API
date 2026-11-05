@@ -1,3 +1,6 @@
+import json
+from app.services.external_sources import search_general_knowledge
+from app.services.rag import search_internal_documents
 
 TOOLS_DEFINITION = [
     {
@@ -50,9 +53,9 @@ TOOLS_DEFINITION = [
 def ejecutar_tool(nombre_tool: str, argumentos: dict) -> str:
     """Ejecuta la funcion Python correspondiente segun lo que decida el modelo."""
     if nombre_tool == "buscar_documentos_internos":
-        resultado = buscar_documentos_internos(argumentos["query"])
+        resultado = search_internal_documents(argumentos["query"])
     elif nombre_tool == "buscar_conocimiento_general":
-        resultado = buscar_conocimiento_general(argumentos["query"])
+        resultado = search_general_knowledge(argumentos["query"])
     else:
         resultado = {"error": f"Tool desconocida: {nombre_tool}"}
 

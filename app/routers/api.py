@@ -1,63 +1,118 @@
-from fastapi import APIRouter,FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from typing import List
+from app.core.config import settings
+from app.schemas.chat import ChatRequest, ChatMessage, RepositoryDocItem
+from app.services.response import response
+from app.services.llm import get_chat_with_tools, get_chat
 from app.services import prompts
+from app.services.human_review import PENDING_CONFIRMATIONS, TOOLS_REQUIRING_CONFIRMATION, parse_confirmation
+from app.services.guardrail import reload_guardrail, BLOCKED_PATTERNS, check_trip_wire, GUARDRAIL_MESSAGE
+from app.services.tools import TOOLS_DEFINITION, ejecutar_tool
+from azure.storage.blob import BlobServiceClient
+import json
+import uuid
+import requests
 
-router=APIRouter()
+router = APIRouter()
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.post("/guardrail/reload")
+@router.post("/guardrail/reload")
 def guardrail_reload():
     """Recarga blocked_words.txt en caliente, sin reiniciar el servidor."""
     reload_guardrail()
     return {"status": "reloaded", "patterns_loaded": len(BLOCKED_PATTERNS)}
 
-@app.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
+
+@router.get("/api/v1/fuentes")
+def get_internal_sources():
+    try:
+        service = BlobServiceClient.from_connection_string(
+            settings.azure_storage_connection_string)
+        cont = service.get_container_client(settings.azure_storage_container)
+
+        if cont:
+            list_docs: List[dict] = []
+            for i, blob in enumerate(cont.list_blobs(include=["metadata"]), start=1):
+                id = f"src-{i}"
+                file_name = blob.name
+                metadata = blob.metadata or {}
+                category = metadata.get("category", "General")
+                file_size = blob.size
+                # Formatear el tamaño en una unidad legible (MB o KB)
+                file_size_formatted = f"{file_size / (1024 * 1024):.2f} MB" if file_size > 1024 * 1024 else f"{file_size / 1024:.2f} KB"
+                date_updated = blob.last_modified.strftime("%Y-%m-%d") if blob.last_modified else "Desconocida"
+                chunks = int(metadata.get("chunks", 0))
+                embedding_model = metadata.get("embeddingModel", settings.azure_oai_embedding_deployment)
+                description = metadata.get("description", "Documento extraído de Blob Storage.")
+
+                list_docs.append(RepositoryDocItem(
+                    id=id,
+                    title=file_name,
+                    category=category,
+                    size=file_size_formatted,
+                    updated_at=date_updated,
+                    chunks=chunks,
+                    embedding_model=embedding_model,
+                    description=description
+                ))
+            return {
+                "success": True,
+                "data": {
+                    "totalDocuments": len(list_docs),
+                    "documents": list_docs
+                }
+            }
+
+        else:
+            return {"success": False, "data": "Contenedor no accesible"}
+
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+
+@router.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
 def chat(req: ChatRequest):
     session_id = req.conversation_id or str(uuid.uuid4())
-    history = SESSIONS.setdefault(session_id, [])
-    model = req.model_id or CONFIG["oai_deployment"]
+    model = req.model_id or settings.azure_oai_deployment
 
-    # --- Guardarraíl: corre ANTES de cualquier otra cosa, incluida una
-    # eventual confirmacion pendiente ---
+    # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
     if check_trip_wire(req.content):
         PENDING_CONFIRMATIONS.pop(session_id, None)
-        return _respuesta(session_id, GUARDRAIL_MESSAGE, model, blocked=True)
+        return response(session_id=session_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
 
     try:
-        # --- ¿Esta sesion tiene una tool esperando confirmacion S/N? ---
+        # --- ¿Esta sesión tiene una tool esperando confirmación S/N? ---
         if session_id in PENDING_CONFIRMATIONS:
-            confirmado = _parse_confirmation(req.content)
+            confirmado = parse_confirmation(req.content)
             pendiente = PENDING_CONFIRMATIONS[session_id]
 
             if confirmado is None:
-                # No entendimos la respuesta: repetimos la pregunta, sin
-                # ejecutar nada y sin perder lo que estaba pendiente.
-                return _respuesta(
+                return response(
                     session_id,
+                    None,
                     f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
                     model,
-                    herramientas=pendiente["herramientas_pendientes"],
                     confirmacion=True,
+                    herramientas=pendiente["herramientas_pendientes"]
                 )
 
             PENDING_CONFIRMATIONS.pop(session_id)
-
             if not confirmado:
                 answer = "De acuerdo, no realicé esa búsqueda. ¿Hay algo más en lo que te pueda ayudar?"
-                return _respuesta(session_id, answer, model)
+                return response(session_id, None, answer, model)
 
-            # Confirmado -> ahora si ejecutamos las tool_calls que quedaron pendientes
+            # Confirmado -> ahora sí ejecutamos las tool_calls pendientes
             messages = pendiente["messages"]
             fuentes_usadas: List[str] = []
             herramientas_usadas: List[str] = pendiente["herramientas_pendientes"]
-
             for tool_call in pendiente["tool_calls"]:
                 argumentos = json.loads(tool_call.function.arguments)
-                resultado_json = ejecutar_tool(tool_call.function.name, argumentos)
+                resultado_json = ejecutar_tool(
+                    tool_call.function.name, argumentos)
                 resultado_dict = json.loads(resultado_json)
 
                 if "fuentes" in resultado_dict:
@@ -73,48 +128,28 @@ def chat(req: ChatRequest):
                     }
                 )
 
-            final_response = client.chat.completions.create(
-                model=model,
-                temperature=req.temperature,
-                max_tokens=1000,
-                messages=messages,
-            )
-            answer = final_response.choices[0].message.content
-
-            history.append({"role": "user", "content": pendiente["pregunta_original"]})
-            history.append({"role": "assistant", "content": answer})
-
-            return _respuesta(
-                session_id, answer, model,
+            response_message, _ = get_chat(model, req.temperature, messages)
+            answer = response_message.content
+            return response(
+                session_id, None, answer, model,
                 fuentes=fuentes_usadas, herramientas=herramientas_usadas,
             )
 
-        # --- Flujo normal: no hay nada pendiente para esta sesion ---
+        # --- Flujo normal: no hay nada pendiente para esta sesión ---
         messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
-        messages.extend(history)
         messages.append({"role": "user", "content": req.content})
-
-        # Primera llamada: el modelo decide si necesita usar una herramienta
-        response = client.chat.completions.create(
-            model=model,
-            temperature=req.temperature,
-            max_tokens=1000,
-            messages=messages,
-            tools=TOOLS_DEFINITION,
-            tool_choice="auto",
-        )
-
-        response_message = response.choices[0].message
+        response_message, _ = get_chat_with_tools(model, req.temperature, messages, TOOLS_DEFINITION)
         fuentes_usadas: List[str] = []
         herramientas_usadas: List[str] = []
 
         if response_message.tool_calls:
-            nombres_tools = [tc.function.name for tc in response_message.tool_calls]
-
-            # ¿Alguna de las tools que el modelo quiere usar requiere
-            # confirmacion S/N antes de ejecutarse?
+            nombres_tools = [
+                tc.function.name for tc in response_message.tool_calls]
+            # ¿Alguna de las tools requiere confirmación S/N antes de ejecutarse?
             if any(n in TOOLS_REQUIRING_CONFIRMATION for n in nombres_tools):
-                messages.append(response_message)
+                # IMPORTANTE: Usamos .model_dump() para guardarlo como diccionario plano
+                messages.append(
+                    response_message.model_dump(exclude_unset=True))
 
                 primer_call = response_message.tool_calls[0]
                 primer_arg = json.loads(primer_call.function.arguments)
@@ -131,15 +166,17 @@ def chat(req: ChatRequest):
                     "pregunta_original": req.content,
                     "pregunta_confirmacion": pregunta_confirmacion,
                 }
-
-                return _respuesta(
-                    session_id, pregunta_confirmacion, model,
-                    herramientas=nombres_tools, confirmacion=True,
+                return response(
+                    session_id=session_id,
+                    conv_id=None,  # O la variable de conversación que manejes
+                    answer=pregunta_confirmacion,
+                    model=model,
+                    herramientas=nombres_tools,
+                    confirmacion=True,
                 )
 
-            # Ninguna tool pedida requiere confirmacion -> se ejecutan de
-            # inmediato, igual que antes.
-            messages.append(response_message)
+            # docs internos
+            messages.append(response_message.model_dump(exclude_unset=True))
             for tool_call in response_message.tool_calls:
                 nombre_tool = tool_call.function.name
                 argumentos = json.loads(tool_call.function.arguments)
@@ -161,43 +198,18 @@ def chat(req: ChatRequest):
                     }
                 )
 
-            final_response = client.chat.completions.create(
-                model=model,
-                temperature=req.temperature,
-                max_tokens=1000,
-                messages=messages,
-            )
-            answer = final_response.choices[0].message.content
+            final_response, _ = get_chat(model, req.temperature, messages)
+            answer = final_response.content
         else:
             answer = response_message.content
 
-        # Guardar el turno en el historial de la sesion
-        history.append({"role": "user", "content": req.content})
-        history.append({"role": "assistant", "content": answer})
-
-        return _respuesta(
-            session_id, answer, model,
+        return response(
+            session_id, None, answer, model,
             fuentes=fuentes_usadas, herramientas=herramientas_usadas,
         )
 
     except requests.HTTPError as ex:
-        raise HTTPException(status_code=502, detail=f"Error en una herramienta externa: {ex}")
+        raise HTTPException(
+            status_code=502, detail=f"Error en una herramienta externa: {ex}")
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
-
-
-
-@router.get("/sessions/{session_id}/history", response_model=List[HistoryTurn])
-def get_history(session_id: str):
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Sesion no encontrada")
-    return SESSIONS[session_id]
-
-
-@router.delete("/sessions/{session_id}")
-def delete_session(session_id: str):
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Sesion no encontrada")
-    del SESSIONS[session_id]
-    PENDING_CONFIRMATIONS.pop(session_id, None)
-    return {"status": "eliminada", "session_id": session_id}

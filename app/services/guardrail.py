@@ -1,13 +1,13 @@
 from pathlib import Path
 from typing import List
 import re
-from app.services import normalize
+from app.services.normalize import normalize
 # ---------------------------------------------------------------------------
 # Guardarraíl (Trip Wire) - corre ANTES de la primera llamada al LLM.
 # Si se activa, ni siquiera se decide que herramienta usar: se corta ahí.
 # ---------------------------------------------------------------------------
 GUARDRAIL_MESSAGE = "Lo siento, no puedo procesar mensajes que contengan lenguaje ofensivo."
-BLOCKED_WORDS_FILE = Path(__file__).parent / "blocked_words.txt"
+BLOCKED_WORDS_FILE = Path(__file__).parent.parent.parent / "blocked_words.txt"
 
 
 def check_trip_wire(text: str) -> bool:
