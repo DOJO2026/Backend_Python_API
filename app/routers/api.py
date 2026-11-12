@@ -1,6 +1,13 @@
+import json
+import uuid
+import requests
+import pyodbc
 from fastapi import APIRouter, FastAPI, HTTPException
 from typing import List
 from app.core.config import settings
+from app.db.create_conversation import create_conversation
+from app.db.new_user_message import new_user_message
+from app.db.new_assistant_message import new_assistant_message
 from app.schemas.chat import ChatRequest, ChatMessage, RepositoryDocItem
 from app.services.response import response
 from app.services.llm import get_chat_with_tools, get_chat
@@ -9,11 +16,10 @@ from app.services.human_review import PENDING_CONFIRMATIONS, TOOLS_REQUIRING_CON
 from app.services.guardrail import reload_guardrail, BLOCKED_PATTERNS, check_trip_wire, GUARDRAIL_MESSAGE
 from app.services.tools import TOOLS_DEFINITION, ejecutar_tool
 from azure.storage.blob import BlobServiceClient
-import json
-import uuid
-import requests
+
 
 router = APIRouter()
+
 
 @router.get("/health")
 def health():
@@ -43,11 +49,15 @@ def get_internal_sources():
                 category = metadata.get("category", "General")
                 file_size = blob.size
                 # Formatear el tamaño en una unidad legible (MB o KB)
-                file_size_formatted = f"{file_size / (1024 * 1024):.2f} MB" if file_size > 1024 * 1024 else f"{file_size / 1024:.2f} KB"
-                date_updated = blob.last_modified.strftime("%Y-%m-%d") if blob.last_modified else "Desconocida"
+                file_size_formatted = f"{file_size / (1024 * 1024):.2f} MB" if file_size > 1024 * \
+                    1024 else f"{file_size / 1024:.2f} KB"
+                date_updated = blob.last_modified.strftime(
+                    "%Y-%m-%d") if blob.last_modified else "Desconocida"
                 chunks = int(metadata.get("chunks", 0))
-                embedding_model = metadata.get("embeddingModel", settings.azure_oai_embedding_deployment)
-                description = metadata.get("description", "Documento extraído de Blob Storage.")
+                embedding_model = metadata.get(
+                    "embeddingModel", settings.azure_oai_embedding_deployment)
+                description = metadata.get(
+                    "description", "Documento extraído de Blob Storage.")
 
                 list_docs.append(RepositoryDocItem(
                     id=id,
@@ -76,15 +86,22 @@ def get_internal_sources():
 
 @router.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
 def chat(req: ChatRequest):
-    session_id = req.conversation_id or str(uuid.uuid4())
+    #session_id = req.conversation_id or str(uuid.uuid4())
+    conv_id = req.conversation_id
     model = req.model_id or settings.azure_oai_deployment
 
-    # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
-    if check_trip_wire(req.content):
-        PENDING_CONFIRMATIONS.pop(session_id, None)
-        return response(session_id=session_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
-
     try:
+        if not conv_id:
+            create_conversation(req)
+        else:
+            new_user_message(req)
+        
+        # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
+        if check_trip_wire(req.content):
+            PENDING_CONFIRMATIONS.pop(req.conversation_id, None)
+            assistant_message=response(session_id=session_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
+            return 
+
         # --- ¿Esta sesión tiene una tool esperando confirmación S/N? ---
         if session_id in PENDING_CONFIRMATIONS:
             confirmado = parse_confirmation(req.content)
@@ -138,7 +155,8 @@ def chat(req: ChatRequest):
         # --- Flujo normal: no hay nada pendiente para esta sesión ---
         messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
         messages.append({"role": "user", "content": req.content})
-        response_message, _ = get_chat_with_tools(model, req.temperature, messages, TOOLS_DEFINITION)
+        response_message, _ = get_chat_with_tools(
+            model, req.temperature, messages, TOOLS_DEFINITION)
         fuentes_usadas: List[str] = []
         herramientas_usadas: List[str] = []
 
@@ -207,7 +225,9 @@ def chat(req: ChatRequest):
             session_id, None, answer, model,
             fuentes=fuentes_usadas, herramientas=herramientas_usadas,
         )
-
+    except pyodbc.Error as db_ex:
+        raise HTTPException(
+            status_code=503, detail=f'Error en base de datos: {str(db_ex)}')
     except requests.HTTPError as ex:
         raise HTTPException(
             status_code=502, detail=f"Error en una herramienta externa: {ex}")
