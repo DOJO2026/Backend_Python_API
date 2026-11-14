@@ -6,7 +6,6 @@ from app.schemas.chat import ChatMessage, MessageSource
 
 
 def response(
-    session_id: str,
     conv_id: str,
     answer: str,
     model: str,
@@ -18,7 +17,6 @@ def response(
     # sin duplicados, conserva orden
     fuentes_unicas = list(dict.fromkeys(fuentes or []))
     return ChatMessage(
-        id=session_id,
         conversation_id=conv_id,
         role="assistant",
         content=answer,

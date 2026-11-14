@@ -5,9 +5,7 @@ import pyodbc
 from fastapi import APIRouter, FastAPI, HTTPException
 from typing import List
 from app.core.config import settings
-from app.db.create_conversation import create_conversation
-from app.db.new_user_message import new_user_message
-from app.db.new_assistant_message import new_assistant_message
+from app.db.save_chat_transaction import save_chat_transaction
 from app.schemas.chat import ChatRequest, ChatMessage, RepositoryDocItem
 from app.services.response import response
 from app.services.llm import get_chat_with_tools, get_chat
@@ -17,21 +15,17 @@ from app.services.guardrail import reload_guardrail, BLOCKED_PATTERNS, check_tri
 from app.services.tools import TOOLS_DEFINITION, ejecutar_tool
 from azure.storage.blob import BlobServiceClient
 
-
 router = APIRouter()
-
 
 @router.get("/health")
 def health():
     return {"status": "ok"}
-
 
 @router.post("/guardrail/reload")
 def guardrail_reload():
     """Recarga blocked_words.txt en caliente, sin reiniciar el servidor."""
     reload_guardrail()
     return {"status": "reloaded", "patterns_loaded": len(BLOCKED_PATTERNS)}
-
 
 @router.get("/api/v1/fuentes")
 def get_internal_sources():
@@ -86,42 +80,43 @@ def get_internal_sources():
 
 @router.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
 def chat(req: ChatRequest):
-    #session_id = req.conversation_id or str(uuid.uuid4())
-    conv_id = req.conversation_id
     model = req.model_id or settings.azure_oai_deployment
+    req.model_id=model
+    user_message = req
+    conv_id = req.conversation_id
 
-    try:
-        if not conv_id:
-            create_conversation(req)
-        else:
-            new_user_message(req)
-        
-        # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
-        if check_trip_wire(req.content):
-            PENDING_CONFIRMATIONS.pop(req.conversation_id, None)
-            assistant_message=response(session_id=session_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
-            return 
+    try:  
+       # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
+        if check_trip_wire(user_message.content):
+            PENDING_CONFIRMATIONS.pop(conv_id, None)
+            assistant_message =response(conv_id=conv_id, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
+            save_chat_transaction(user_message, assistant_message)
+            return assistant_message
 
         # --- ¿Esta sesión tiene una tool esperando confirmación S/N? ---
-        if session_id in PENDING_CONFIRMATIONS:
+        if conv_id in PENDING_CONFIRMATIONS:
             confirmado = parse_confirmation(req.content)
-            pendiente = PENDING_CONFIRMATIONS[session_id]
+            pendiente = PENDING_CONFIRMATIONS[conv_id]
 
             if confirmado is None:
-                return response(
-                    session_id,
-                    None,
+                assistant_message= response(
+                    conv_id,
                     f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
                     model,
                     confirmacion=True,
                     herramientas=pendiente["herramientas_pendientes"]
+                    
                 )
+                save_chat_transaction(user_message, assistant_message)
+                return assistant_message
 
-            PENDING_CONFIRMATIONS.pop(session_id)
+            PENDING_CONFIRMATIONS.pop(conv_id)
             if not confirmado:
                 answer = "De acuerdo, no realicé esa búsqueda. ¿Hay algo más en lo que te pueda ayudar?"
-                return response(session_id, None, answer, model)
-
+                assistant_message = response(conv_id, answer, model)
+                save_chat_transaction(user_message, assistant_message)
+                return assistant_message
+            
             # Confirmado -> ahora sí ejecutamos las tool_calls pendientes
             messages = pendiente["messages"]
             fuentes_usadas: List[str] = []
@@ -144,19 +139,20 @@ def chat(req: ChatRequest):
                         "content": resultado_json,
                     }
                 )
-
+                
             response_message, _ = get_chat(model, req.temperature, messages)
             answer = response_message.content
-            return response(
-                session_id, None, answer, model,
+            assistant_message= response(
+                conv_id, answer, model,
                 fuentes=fuentes_usadas, herramientas=herramientas_usadas,
             )
+            save_chat_transaction(user_message, assistant_message)
+            return assistant_message
 
         # --- Flujo normal: no hay nada pendiente para esta sesión ---
         messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
         messages.append({"role": "user", "content": req.content})
-        response_message, _ = get_chat_with_tools(
-            model, req.temperature, messages, TOOLS_DEFINITION)
+        response_message, _ = get_chat_with_tools(model, req.temperature, messages, TOOLS_DEFINITION)
         fuentes_usadas: List[str] = []
         herramientas_usadas: List[str] = []
 
@@ -177,21 +173,23 @@ def chat(req: ChatRequest):
                     f'("{consulta}"). ¿Deseas que la consulte? Responde S/N.'
                 )
 
-                PENDING_CONFIRMATIONS[session_id] = {
+                assistant_message= response(
+                                    conv_id=conv_id,
+                                    answer=pregunta_confirmacion,
+                                    model=model,
+                                    herramientas=nombres_tools,
+                                    confirmacion=True,
+                                )
+                conv_id=save_chat_transaction(user_message, assistant_message)
+                PENDING_CONFIRMATIONS[conv_id] = {
                     "messages": messages,
                     "tool_calls": response_message.tool_calls,
                     "herramientas_pendientes": nombres_tools,
                     "pregunta_original": req.content,
                     "pregunta_confirmacion": pregunta_confirmacion,
                 }
-                return response(
-                    session_id=session_id,
-                    conv_id=None,  # O la variable de conversación que manejes
-                    answer=pregunta_confirmacion,
-                    model=model,
-                    herramientas=nombres_tools,
-                    confirmacion=True,
-                )
+                
+                return assistant_message
 
             # docs internos
             messages.append(response_message.model_dump(exclude_unset=True))
@@ -220,11 +218,13 @@ def chat(req: ChatRequest):
             answer = final_response.content
         else:
             answer = response_message.content
-
-        return response(
-            session_id, None, answer, model,
+        
+        assistant_message = response(
+            conv_id,answer, model,
             fuentes=fuentes_usadas, herramientas=herramientas_usadas,
         )
+        save_chat_transaction(user_message, assistant_message)
+        return assistant_message
     except pyodbc.Error as db_ex:
         raise HTTPException(
             status_code=503, detail=f'Error en base de datos: {str(db_ex)}')

@@ -4,9 +4,18 @@ from app.core.config import settings
 
 
 def get_db_connection():
+    # conn_str = (
+    #     f"mssql+aioodbc://{settings.azure_sql_user}:{settings.azure_sql_password}@{settings.azure_sql_server}:1433/{settings.azure_sql_database}"
+    #     f"?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no"
+    # )
     conn_str = (
-        f"mssql+aioodbc://{settings.azure_sql_user}:{settings.azure_sql_password}@{settings.azure_sql_server}:1433/{settings.azure_sql_database}"
-        f"?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no"
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={settings.azure_sql_server},1433;"
+        f"DATABASE={settings.azure_sql_database};"
+        f"UID={settings.azure_sql_user};"
+        f"PWD={settings.azure_sql_password};"
+        f"Encrypt=yes;"
+        f"TrustServerCertificate=no;"
     )
 
     if not conn_str:
