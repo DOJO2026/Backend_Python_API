@@ -87,29 +87,27 @@ def get_internal_sources():
 @router.post("/api/v1/chat/messages", response_model=ChatMessage, response_model_by_alias=True)
 def chat(req: ChatRequest):
     #session_id = req.conversation_id or str(uuid.uuid4())
-    conv_id = req.conversation_id
+    user_message = req
+    conv_id = user_message.conversation_id
     model = req.model_id or settings.azure_oai_deployment
 
     try:
-        if not conv_id:
-            create_conversation(req)
-        else:
-            new_user_message(req)
         
-        # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
-        if check_trip_wire(req.content):
-            PENDING_CONFIRMATIONS.pop(req.conversation_id, None)
-            assistant_message=response(session_id=session_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
-            return 
+       # --- Guardarraíl: corre ANTES de cualquier otra cosa ---
+        if check_trip_wire(user_message.content):
+            PENDING_CONFIRMATIONS.pop(conv_id, None)
+            assistant_message =response(session_id=conv_id, conv_id=None, answer=GUARDRAIL_MESSAGE, model=model, blocked=True)
+            
+            return assistant_message
 
         # --- ¿Esta sesión tiene una tool esperando confirmación S/N? ---
-        if session_id in PENDING_CONFIRMATIONS:
+        if conv_id in PENDING_CONFIRMATIONS:
             confirmado = parse_confirmation(req.content)
-            pendiente = PENDING_CONFIRMATIONS[session_id]
+            pendiente = PENDING_CONFIRMATIONS[conv_id]
 
             if confirmado is None:
                 return response(
-                    session_id,
+                    conv_id,
                     None,
                     f"No entendí tu respuesta. {pendiente['pregunta_confirmacion']}",
                     model,
@@ -117,10 +115,10 @@ def chat(req: ChatRequest):
                     herramientas=pendiente["herramientas_pendientes"]
                 )
 
-            PENDING_CONFIRMATIONS.pop(session_id)
+            PENDING_CONFIRMATIONS.pop(conv_id)
             if not confirmado:
                 answer = "De acuerdo, no realicé esa búsqueda. ¿Hay algo más en lo que te pueda ayudar?"
-                return response(session_id, None, answer, model)
+                return response(conv_id, None, answer, model)
 
             # Confirmado -> ahora sí ejecutamos las tool_calls pendientes
             messages = pendiente["messages"]
@@ -148,15 +146,14 @@ def chat(req: ChatRequest):
             response_message, _ = get_chat(model, req.temperature, messages)
             answer = response_message.content
             return response(
-                session_id, None, answer, model,
+                conv_id, None, answer, model,
                 fuentes=fuentes_usadas, herramientas=herramientas_usadas,
             )
 
         # --- Flujo normal: no hay nada pendiente para esta sesión ---
         messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
         messages.append({"role": "user", "content": req.content})
-        response_message, _ = get_chat_with_tools(
-            model, req.temperature, messages, TOOLS_DEFINITION)
+        response_message, _ = get_chat_with_tools(model, req.temperature, messages, TOOLS_DEFINITION)
         fuentes_usadas: List[str] = []
         herramientas_usadas: List[str] = []
 
@@ -177,7 +174,7 @@ def chat(req: ChatRequest):
                     f'("{consulta}"). ¿Deseas que la consulte? Responde S/N.'
                 )
 
-                PENDING_CONFIRMATIONS[session_id] = {
+                PENDING_CONFIRMATIONS[conv_id] = {
                     "messages": messages,
                     "tool_calls": response_message.tool_calls,
                     "herramientas_pendientes": nombres_tools,
@@ -185,7 +182,7 @@ def chat(req: ChatRequest):
                     "pregunta_confirmacion": pregunta_confirmacion,
                 }
                 return response(
-                    session_id=session_id,
+                    session_id=conv_id,
                     conv_id=None,  # O la variable de conversación que manejes
                     answer=pregunta_confirmacion,
                     model=model,
@@ -222,7 +219,7 @@ def chat(req: ChatRequest):
             answer = response_message.content
 
         return response(
-            session_id, None, answer, model,
+            conv_id, None, answer, model,
             fuentes=fuentes_usadas, herramientas=herramientas_usadas,
         )
     except pyodbc.Error as db_ex:

@@ -10,7 +10,7 @@ def new_user_message(user_message: ChatRequest):
         if conn:
             conn.autocommit = False
             cursor = conn.cursor()
-            m_seq=cursor.execute("SELECT MAX(M_SEQ)+1 FROM DBO.MESSAGE WHERE M_CONVERSATION_ID = ?", (user_message.conversation_id,)).fetchval()
+            m_seq=cursor.execute("SELECT ISNULL(MAX(M_SEQ),0)+1 FROM DBO.MESSAGE WHERE M_CONVERSATION_ID = ?", (user_message.conversation_id,)).fetchval()
             m_sources=json.dumps(user_message.sources) if user_message.sources is not None else None
             cursor.execute("""
                 INSERT INTO DBO.MESSAGE(M_CONVERSATION_ID,M_USER_ID,M_SEQ,M_ROLE,M_CONTENT,M_SOURCES,
