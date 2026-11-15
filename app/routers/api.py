@@ -1,10 +1,11 @@
 import json
-import uuid
 import requests
 import pyodbc
 from fastapi import APIRouter, FastAPI, HTTPException
 from typing import List
 from app.core.config import settings
+from app.db.get_conversations import get_list_conversations
+from app.db.get_messages import get_list_messages_by_conversation
 from app.db.save_chat_transaction import save_chat_transaction
 from app.schemas.chat import ChatRequest, ChatMessage, RepositoryDocItem
 from app.services.response import response
@@ -231,5 +232,28 @@ def chat(req: ChatRequest):
     except requests.HTTPError as ex:
         raise HTTPException(
             status_code=502, detail=f"Error en una herramienta externa: {ex}")
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+
+
+@router.get("/api/v1/chat/conversations")
+def get_conversations(archived: bool | None = None,
+                       category: str | None = None,
+                       title: str | None = None):
+    try:
+        return get_list_conversations(archived, category, title)
+    except pyodbc.Error as db_ex:
+        raise HTTPException(
+                status_code=503, detail=f'Error en base de datos: {str(db_ex)}')
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+    
+@router.get("/api/v1/chat/conversations/{id}/messages")
+def get_messages_by_conversation(id: str):
+    try:
+        return get_list_messages_by_conversation(id)
+    except pyodbc.Error as db_ex:
+        raise HTTPException(
+                    status_code=503, detail=f'Error en base de datos: {str(db_ex)}')
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
