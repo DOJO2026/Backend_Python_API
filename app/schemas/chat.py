@@ -38,7 +38,6 @@ class ClaimDetails(_Base):
     policy_number: Optional[str] = Field(None, alias="policyNumber")
     
 class ChatMessage(_Base):
-    id: str
     conversation_id: Optional[str] = Field(None, alias="conversationId")
     role: Literal["user", "assistant"]
     content: str
